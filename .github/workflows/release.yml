@@ -12,8 +12,8 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Подставить версию из тега
@@ -27,13 +27,13 @@ jobs:
           open("task_tray.py", "w", encoding="utf-8").write(s)
       - run: pip install PySide6 pyinstaller
       - run: pyinstaller --noconfirm --noconsole --onefile --name Tasks task_tray.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: Tasks
           path: dist/Tasks.exe
       - name: Опубликовать релиз
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/Tasks.exe

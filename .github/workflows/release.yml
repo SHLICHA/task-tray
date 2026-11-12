@@ -1,0 +1,41 @@
+# Выпуск новой версии:  git tag v1.1.0 && git push --tags
+# GitHub соберёт Tasks.exe, подставит версию из тега и опубликует релиз.
+# Установленные программы увидят его при следующей проверке (раз в 6 часов или вручную в меню ⚙).
+name: Release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:        # ручной запуск — просто сборка exe без релиза
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Подставить версию из тега
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: python
+        run: |
+          import os, re
+          v = os.environ["GITHUB_REF_NAME"].lstrip("v")
+          s = open("task_tray.py", encoding="utf-8").read()
+          s = re.sub(r'^VERSION = ".*?"', f'VERSION = "{v}"', s, count=1, flags=re.M)
+          open("task_tray.py", "w", encoding="utf-8").write(s)
+      - run: pip install PySide6 pyinstaller
+      - run: pyinstaller --noconfirm --noconsole --onefile --name Tasks task_tray.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Tasks
+          path: dist/Tasks.exe
+      - name: Опубликовать релиз
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Tasks.exe
+            task_tray.py
+          generate_release_notes: true

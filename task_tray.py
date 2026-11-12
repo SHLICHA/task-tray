@@ -10,11 +10,11 @@ import uuid
 from datetime import datetime, time, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QDateTime, QObject, QPoint, QStandardPaths, Qt, QThread, QTime, QTimer, QUrl
-from PySide6.QtGui import QAction, QBrush, QColor, QFont, QGuiApplication, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtCore import QDate, QLocale, QObject, Signal, QPoint, QStandardPaths, Qt, QThread, QTime, QTimer, QUrl
+from PySide6.QtGui import QAction, QBrush, QColor, QGuiApplication, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtNetwork import QLocalServer, QLocalSocket, QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDateTimeEdit, QDialog, QDialogButtonBox, QFormLayout,
+    QAbstractSpinBox, QApplication, QButtonGroup, QCheckBox, QComboBox, QDateEdit, QGridLayout, QWidgetAction, QDialog, QDialogButtonBox, QFormLayout,
     QFrame, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
     QMenu, QMessageBox, QPlainTextEdit, QProgressDialog, QPushButton, QSpinBox, QSystemTrayIcon, QTimeEdit,
     QToolButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
@@ -369,6 +369,114 @@ def make_icon(alert=False):
     return QIcon(pm)
 
 
+# ───────────────────────────── выбор времени ─────────────────────────────
+
+class TimePicker(QWidget):
+    """Поле времени ЧЧ:ММ: можно ввести с клавиатуры, крутить колесом или выбрать в сетке часов и минут."""
+    timeChanged = Signal(QTime)
+    PRESETS = ["09:00", "12:00", "15:00", "18:00", "20:00"]
+
+    def __init__(self, t=QTime(9, 0), parent=None):
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
+        self.edit = QTimeEdit(t)
+        self.edit.setDisplayFormat("HH:mm")
+        self.edit.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.edit.setAlignment(Qt.AlignCenter)
+        self.edit.setFixedWidth(64)
+        self.edit.setToolTip("Введите время или крутите колесо мыши над часами/минутами")
+        self.edit.timeChanged.connect(self._sync)
+        self.btn = QToolButton()
+        self.btn.setText("🕒")
+        self.btn.setToolTip("Выбрать время")
+        self.btn.setPopupMode(QToolButton.InstantPopup)
+        self.menu = QMenu(self.btn)
+        act = QWidgetAction(self.menu)
+        act.setDefaultWidget(self._build_grid())
+        self.menu.addAction(act)
+        self.menu.aboutToShow.connect(lambda: self._sync(self.edit.time()))
+        self.btn.setMenu(self.menu)
+        lay.addWidget(self.edit)
+        lay.addWidget(self.btn)
+
+    def _build_grid(self):
+        w = QWidget()
+        w.setStyleSheet("""
+            QPushButton { min-width: 34px; max-width: 34px; min-height: 26px; padding: 0;
+                          border: 1px solid transparent; border-radius: 5px; background: transparent; }
+            QPushButton:hover { background: palette(midlight); }
+            QPushButton:checked { background: #2563eb; color: white; }
+            QPushButton[preset="true"] { min-width: 50px; max-width: 50px; border-color: palette(mid); }
+            QLabel { color: gray; font-size: 11px; }
+        """)
+        v = QVBoxLayout(w)
+        v.setContentsMargins(8, 6, 8, 8)
+        v.setSpacing(4)
+
+        def grid(values, cols, on_click):
+            g = QGridLayout()
+            g.setSpacing(2)
+            group = QButtonGroup(w)
+            group.setExclusive(True)
+            for i, val in enumerate(values):
+                b = QPushButton(f"{val:02d}")
+                b.setCheckable(True)
+                b.setFocusPolicy(Qt.NoFocus)
+                b.clicked.connect(lambda _=False, x=val: on_click(x))
+                group.addButton(b, val)
+                g.addWidget(b, i // cols, i % cols)
+            return g, group
+
+        v.addWidget(QLabel("Часы"))
+        g, self.hours = grid(range(24), 6, self._pick_hour)
+        v.addLayout(g)
+        v.addWidget(QLabel("Минуты"))
+        g, self.minutes = grid(range(0, 60, 5), 6, self._pick_minute)
+        v.addLayout(g)
+        v.addWidget(QLabel("Быстрый выбор"))
+        row = QHBoxLayout()
+        row.setSpacing(2)
+        for text in self.PRESETS:
+            b = QPushButton(text)
+            b.setProperty("preset", True)
+            b.setFocusPolicy(Qt.NoFocus)
+            b.clicked.connect(lambda _=False, x=text: self._pick_preset(x))
+            row.addWidget(b)
+        v.addLayout(row)
+        return w
+
+    def _sync(self, t):
+        for group, val in ((self.hours, t.hour()), (self.minutes, t.minute())):
+            b = group.button(val)
+            if b:
+                b.setChecked(True)
+            elif group.checkedButton():          # минута не кратна 5 — снять выделение
+                group.setExclusive(False)
+                group.checkedButton().setChecked(False)
+                group.setExclusive(True)
+        self.timeChanged.emit(t)
+
+    def _pick_hour(self, h):
+        self.edit.setTime(QTime(h, self.edit.time().minute()))   # меню остаётся открытым: дальше минуты
+
+    def _pick_minute(self, m):
+        self.edit.setTime(QTime(self.edit.time().hour(), m))
+        self.menu.hide()
+
+    def _pick_preset(self, text):
+        self.edit.setTime(QTime.fromString(text, "HH:mm"))
+        self.menu.hide()
+
+    def time(self):
+        return self.edit.time()
+
+    def setTime(self, t):
+        self.edit.setTime(t)
+
+
+
 # ───────────────────────────── диалог задачи ─────────────────────────────
 
 class TaskDialog(QDialog):
@@ -426,16 +534,34 @@ class TaskDialog(QDialog):
         start = parse_dt(task["start"]) or (datetime.now() + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
         self.has_due = QCheckBox()
         self.has_due.setChecked(bool(task["start"]) or not task["title"])
-        self.dt = QDateTimeEdit(QDateTime(QDate(start.year, start.month, start.day), QTime(start.hour, start.minute)))
-        self.dt.setCalendarPopup(True)
-        self.dt.setDisplayFormat("dd.MM.yyyy  HH:mm")
+        self.date = QDateEdit(QDate(start.year, start.month, start.day))
+        self.date.setCalendarPopup(True)
+        self.date.setDisplayFormat("dd.MM.yyyy, ddd")
+        self.date.calendarWidget().setFirstDayOfWeek(Qt.Monday)
+        self.date.calendarWidget().setGridVisible(True)
         dw = QWidget()
         dl = QHBoxLayout(dw)
         dl.setContentsMargins(0, 0, 0, 0)
         dl.addWidget(self.has_due)
-        dl.addWidget(self.dt, 1)
-        form.addRow("Срок:", dw)
+        dl.addWidget(self.date, 1)
+        self.quick_dates = []
+        for label, days in (("Сегодня", 0), ("Завтра", 1), ("+неделя", 7)):
+            b = QToolButton()
+            b.setText(label)
+            b.clicked.connect(lambda _=False, d=days: self.date.setDate(QDate.currentDate().addDays(d)))
+            self.quick_dates.append(b)
+            dl.addWidget(b)
+        form.addRow("Дата:", dw)
         self.due_row = dw
+
+        self.time = TimePicker(QTime(start.hour, start.minute))
+        tw = QWidget()
+        tl = QHBoxLayout(tw)
+        tl.setContentsMargins(0, 0, 0, 0)
+        tl.addWidget(self.time)
+        tl.addStretch()
+        form.addRow("Время:", tw)
+        self.time_row = tw
 
         # повтор
         rep = task["repeat"]
@@ -483,10 +609,8 @@ class TaskDialog(QDialog):
         win = rep.get("window")
         self.win_cb = QCheckBox("Только с")
         self.win_cb.setChecked(bool(win))
-        self.win_from = QTimeEdit(QTime.fromString(win[0] if win else "09:00", "HH:mm"))
-        self.win_to = QTimeEdit(QTime.fromString(win[1] if win else "18:00", "HH:mm"))
-        for w in (self.win_from, self.win_to):
-            w.setDisplayFormat("HH:mm")
+        self.win_from = TimePicker(QTime.fromString(win[0] if win else "09:00", "HH:mm"))
+        self.win_to = TimePicker(QTime.fromString(win[1] if win else "18:00", "HH:mm"))
         ww = QWidget()
         wl = QHBoxLayout(ww)
         wl.setContentsMargins(0, 0, 0, 0)
@@ -495,7 +619,7 @@ class TaskDialog(QDialog):
         wl.addWidget(QLabel("до"))
         wl.addWidget(self.win_to)
         wl.addStretch()
-        form.addRow("Время:", ww)
+        form.addRow("Активно:", ww)
         self.win_row = ww
 
         self.before = self._combo(self.BEFORE, task.get("remind_before", 0), "За {} мин")
@@ -515,7 +639,7 @@ class TaskDialog(QDialog):
         bb.rejected.connect(self.reject)
         form.addRow(bb)
 
-        for sig in (self.has_due.toggled, self.dt.dateTimeChanged, self.repeat.currentIndexChanged,
+        for sig in (self.has_due.toggled, self.date.dateChanged, self.time.timeChanged, self.repeat.currentIndexChanged,
                     self.interval.valueChanged, self.win_cb.toggled, self.win_from.timeChanged,
                     self.win_to.timeChanged):
             sig.connect(self._update)
@@ -557,7 +681,8 @@ class TaskDialog(QDialog):
         return rep
 
     def _start(self):
-        return self.dt.dateTime().toPython().replace(second=0, microsecond=0)
+        d, t = self.date.date(), self.time.time()
+        return datetime(d.year(), d.month(), d.day(), t.hour(), t.minute())
 
     def _update(self):
         kind = self.repeat.currentData()
@@ -565,8 +690,11 @@ class TaskDialog(QDialog):
         if recurring:
             self.has_due.setChecked(True)
         self.has_due.setEnabled(not recurring)
-        self.dt.setEnabled(self.has_due.isChecked())
-        self.form.labelForField(self.due_row).setText("Начиная с:" if recurring else "Срок:")
+        on = self.has_due.isChecked()
+        for w in [self.date, self.time] + self.quick_dates:
+            w.setEnabled(on)
+        self.form.labelForField(self.due_row).setText("Начиная с:" if recurring else "Дата:")
+        self.form.labelForField(self.time_row).setText("Первый раз в:" if kind in ("minutes", "hours") else "Время:")
         show_n = kind in self.UNITS
         for w in (self.every, self.interval, self.unit):
             w.setVisible(show_n)
@@ -1289,6 +1417,7 @@ class Controller(QObject):
 
 def main():
     app = QApplication(sys.argv)
+    QLocale.setDefault(QLocale(QLocale.Russian, QLocale.Russia))   # русские дни недели в календаре
     app.setApplicationName("TaskTray")
     app.setApplicationDisplayName(APP_NAME)
     app.setQuitOnLastWindowClosed(False)

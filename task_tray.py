@@ -800,7 +800,7 @@ class ReminderPopup(QFrame):
             m.addAction(label, lambda mm=mins: ctl.snooze(tid, mm))
         snooze.setMenu(m)
         openb = QPushButton("Открыть")
-        openb.clicked.connect(lambda: ctl.edit_task(tid))
+        openb.clicked.connect(lambda: ctl.open_task(tid))
         row.addWidget(done)
         row.addWidget(snooze)
         row.addStretch()
@@ -820,6 +820,174 @@ class ReminderPopup(QFrame):
         self.sub.setText("\n".join(lines))
         self.sub.setVisible(bool(lines))
         self.adjustSize()
+
+
+# ───────────────────────────── окно выполнения задачи ─────────────────────────────
+
+class TaskView(QDialog):
+    """Просмотр задачи без редактирования: можно только отмечать подзадачи, выполнить или отложить."""
+
+    def __init__(self, ctl, tid):
+        super().__init__(None, Qt.Window | Qt.WindowStaysOnTopHint)
+        self.ctl, self.tid = ctl, tid
+        self._filling = False
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setWindowIcon(ctl.icon_ok)
+        self.setMinimumWidth(440)
+        self.setStyleSheet("""
+            QLabel#meta { color: gray; }
+            QLabel#overdue { color: #dc2626; font-weight: bold; }
+            QPushButton#done { background: #2563eb; color: white; border: none; border-radius: 6px;
+                               padding: 7px 16px; font-weight: bold; }
+            QPushButton#done:hover { background: #1d4ed8; }
+            QPushButton#done:disabled { background: #9ca3af; }
+        """)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(18, 16, 18, 14)
+        v.setSpacing(8)
+        self.title = QLabel()
+        self.title.setWordWrap(True)
+        self.title.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        f = self.title.font()
+        f.setPointSize(f.pointSize() + 4)
+        f.setBold(True)
+        self.title.setFont(f)
+        v.addWidget(self.title)
+        self.when = QLabel()
+        v.addWidget(self.when)
+        self.meta = QLabel()
+        self.meta.setObjectName("meta")
+        self.meta.setWordWrap(True)
+        v.addWidget(self.meta)
+        self.notes = QLabel()
+        self.notes.setWordWrap(True)
+        self.notes.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.LinksAccessibleByMouse)
+        self.notes.setOpenExternalLinks(True)
+        self.notes.setStyleSheet("background: palette(base); border: 1px solid palette(mid); "
+                                 "border-radius: 6px; padding: 8px;")
+        v.addWidget(self.notes)
+        self.sub_head = QLabel()
+        f = self.sub_head.font()
+        f.setBold(True)
+        self.sub_head.setFont(f)
+        v.addWidget(self.sub_head)
+        self.subs = QListWidget()
+        self.subs.setSelectionMode(QListWidget.NoSelection)
+        self.subs.setFrameShape(QFrame.NoFrame)
+        self.subs.setSpacing(2)
+        self.subs.viewport().setAutoFillBackground(False)
+        self.subs.setFocusPolicy(Qt.NoFocus)
+        self.subs.itemChanged.connect(self._sub_changed)
+        self._pressed = None
+        self.subs.itemPressed.connect(lambda it: setattr(self, "_pressed", (it, it.checkState())))
+        self.subs.itemClicked.connect(self._sub_clicked)
+        v.addWidget(self.subs)
+
+        row = QHBoxLayout()
+        self.b_done = QPushButton("✓ Выполнено")
+        self.b_done.setObjectName("done")
+        self.b_done.clicked.connect(self._done)
+        self.b_snooze = QToolButton()
+        self.b_snooze.setText("Отложить ▾")
+        self.b_snooze.setPopupMode(QToolButton.InstantPopup)
+        self.b_snooze.setMinimumHeight(30)
+        m = QMenu(self.b_snooze)
+        for mins, label in ((5, "на 5 минут"), (10, "на 10 минут"), (30, "на 30 минут"), (60, "на 1 час"),
+                            (180, "на 3 часа"), (1440, "на сутки")):
+            m.addAction(label, lambda mm=mins: (self.ctl.snooze(self.tid, mm), self.close()))
+        self.b_snooze.setMenu(m)
+        close = QPushButton("Закрыть")
+        close.clicked.connect(self.close)
+        row.addWidget(self.b_done)
+        row.addWidget(self.b_snooze)
+        row.addStretch()
+        row.addWidget(close)
+        v.addSpacing(4)
+        v.addLayout(row)
+        self.refresh()
+
+    def refresh(self):
+        task = self.ctl.store.get(self.tid)
+        if not task:
+            self.close()
+            return
+        now = datetime.now()
+        due = parse_dt(task["due"])
+        self.setWindowTitle(task["title"])
+        self.title.setText(task["title"])
+        if task["done"]:
+            self.when.setObjectName("meta")
+            self.when.setText("Выполнено " + (fmt_due(parse_dt(task["done_at"]), now) if task["done_at"] else ""))
+        elif due is None:
+            self.when.setObjectName("meta")
+            self.when.setText("Без срока")
+        elif due <= now:
+            self.when.setObjectName("overdue")
+            self.when.setText(f"Срок: {fmt_due(due, now)} — просрочено на {humanize(now - due)}")
+        else:
+            self.when.setObjectName("")
+            self.when.setText(f"Срок: {fmt_due(due, now)} (через {humanize(due - now)})")
+        self.when.style().unpolish(self.when)
+        self.when.style().polish(self.when)
+        meta = []
+        if is_recurring(task):
+            meta.append("Повтор: " + describe_repeat(task["repeat"]))
+            if task.get("done_count"):
+                meta.append(f"выполнено раз: {task['done_count']}")
+        snooze = parse_dt(task.get("snooze_until"))
+        if snooze and snooze > now:
+            meta.append(f"отложено до {snooze:%H:%M}")
+        self.meta.setText(" · ".join(meta))
+        self.meta.setVisible(bool(meta))
+        self.notes.setText(task.get("notes", ""))
+        self.notes.setVisible(bool(task.get("notes")))
+
+        self._filling = True
+        self.subs.clear()
+        for s in task.get("subtasks", []):
+            it = QListWidgetItem(s["title"])
+            it.setFlags(Qt.ItemIsEnabled | (Qt.ItemIsUserCheckable if not task["done"] else Qt.NoItemFlags))
+            it.setCheckState(Qt.Checked if s["done"] else Qt.Unchecked)
+            it.setData(SUB_ROLE, s["id"])
+            if s["done"]:
+                f = it.font()
+                f.setStrikeOut(True)
+                it.setFont(f)
+                it.setForeground(QBrush(QColor("#9ca3af")))
+            self.subs.addItem(it)
+        self._filling = False
+        d, n = sub_progress(task)
+        self.sub_head.setText(f"Подзадачи: {d} из {n}")
+        self.sub_head.setVisible(bool(n))
+        self.subs.setVisible(bool(n))
+        if n:
+            self.subs.setFixedHeight(min(n, 10) * (self.subs.sizeHintForRow(0) + 2) + 6)
+        self.b_done.setEnabled(not task["done"])
+        self.b_done.setText("✓ Выполнено" if not task["done"] else "Выполнено")
+        self.b_snooze.setVisible(not task["done"] and due is not None)
+        self.adjustSize()
+
+    def _sub_clicked(self, it):
+        # щелчок по тексту тоже переключает галочку (если Qt уже не переключил её щелчком по квадратику)
+        pressed, self._pressed = self._pressed, None
+        if not (it.flags() & Qt.ItemIsUserCheckable) or not pressed or pressed[0] is not it:
+            return
+        if it.checkState() == pressed[1]:
+            it.setCheckState(Qt.Unchecked if it.checkState() == Qt.Checked else Qt.Checked)
+
+    def _sub_changed(self, it):
+        if self._filling:
+            return
+        sid, done = it.data(SUB_ROLE), it.checkState() == Qt.Checked
+        QTimer.singleShot(0, lambda: self.ctl.toggle_sub(self.tid, sid, done, parent=self))
+
+    def _done(self):
+        self.ctl.complete(self.tid)
+        self.close()
+
+    def closeEvent(self, e):
+        self.ctl.views.pop(self.tid, None)
+        super().closeEvent(e)
 
 
 # ───────────────────────────── обновления ─────────────────────────────
@@ -1118,6 +1286,7 @@ class MainWindow(QMainWindow):
                 sm = m.addMenu("Отложить")
                 for mins, label in ((10, "на 10 минут"), (60, "на 1 час"), (180, "на 3 часа")):
                     sm.addAction(label, lambda mm=mins: self.ctl.snooze(tid, mm))
+        m.addAction("Открыть…", lambda: self.ctl.open_task(tid))
         m.addAction("Изменить…", lambda: self.ctl.edit_task(tid))
         m.addSeparator()
         m.addAction("Удалить", lambda: self.ctl.delete_task(tid))
@@ -1206,13 +1375,15 @@ class Controller(QObject):
         self.store = Store(data_dir() / "tasks.json")
         self.icon_ok, self.icon_alert = make_icon(False), make_icon(True)
         self.popups = {}
+        self.views = {}
+        self.last_notified = None
         self.dialog_open = set()
 
         self.tray = QSystemTrayIcon(self.icon_ok)
         self.tray_menu = QMenu()
         self.tray.setContextMenu(self.tray_menu)
         self.tray.activated.connect(self._tray_activated)
-        self.tray.messageClicked.connect(self.show_window)
+        self.tray.messageClicked.connect(self._message_clicked)
         self.tray.show()
 
         self.updater = Updater(self)
@@ -1312,6 +1483,27 @@ class Controller(QObject):
         self.store.save()
         self.window.refresh()
         self.update_tray()
+        for v in list(self.views.values()):
+            v.refresh()
+
+    def open_task(self, tid):
+        """Окно выполнения задачи (без редактирования)."""
+        if not self.store.get(tid):
+            return
+        self.close_popup(tid)
+        v = self.views.get(tid)
+        if not v:
+            v = self.views[tid] = TaskView(self, tid)
+        v.refresh()
+        v.show()
+        v.raise_()
+        v.activateWindow()
+
+    def _message_clicked(self):
+        if self.last_notified and self.store.get(self.last_notified):
+            self.open_task(self.last_notified)
+        else:
+            self.show_window()
 
     # — таймер —
     def tick(self):
@@ -1339,6 +1531,9 @@ class Controller(QObject):
         else:
             head = f"Просрочено · {fmt_due(due, now)}"
         s = self.store.settings
+        self.last_notified = task["id"]
+        if task["id"] in self.views:
+            self.views[task["id"]].refresh()
         if s["system_notify"]:
             self.tray.showMessage(head, task["title"], QSystemTrayIcon.Information, 10000)
         if s["popup"]:
@@ -1413,6 +1608,8 @@ class Controller(QObject):
         if not task["done"]:
             complete(task, datetime.now().replace(microsecond=0))
         self.close_popup(tid)
+        if tid in self.views:
+            self.views[tid].close()
         self.changed()
 
     def reopen(self, tid):
@@ -1421,7 +1618,7 @@ class Controller(QObject):
             reopen(task)
             self.changed()
 
-    def toggle_sub(self, tid, sid, done):
+    def toggle_sub(self, tid, sid, done, parent=None):
         task = self.store.get(tid)
         if not task:
             return
@@ -1433,7 +1630,7 @@ class Controller(QObject):
             self.popups[tid].set_content(task, self.popups[tid].head.text())
         d, n = sub_progress(task)
         if done and n and d == n and not task["done"]:
-            if QMessageBox.question(self.window, APP_NAME,
+            if QMessageBox.question(parent or self.window, APP_NAME,
                                     f"Все подзадачи выполнены. Отметить «{task['title']}» выполненной?") == QMessageBox.Yes:
                 self.complete(tid)
 

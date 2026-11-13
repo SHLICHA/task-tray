@@ -887,6 +887,10 @@ class Updater(QObject):
         req = QNetworkRequest(QUrl(url))
         req.setRawHeader(b"Accept", accept)
         req.setRawHeader(b"User-Agent", b"TaskTray")
+        # HTTP/2 у Qt рвётся на переадресации GitHub → release-assets ("HTTP/2 protocol error")
+        req.setAttribute(QNetworkRequest.Http2AllowedAttribute, False)
+        req.setAttribute(QNetworkRequest.RedirectPolicyAttribute, QNetworkRequest.NoLessSafeRedirectPolicy)
+        req.setTransferTimeout(120000)
         return req
 
     def auto_check(self):
@@ -945,25 +949,43 @@ class Updater(QObject):
         if box.exec() == QMessageBox.Yes:
             self.download(asset)
 
-    def download(self, asset):
+    def download(self, asset, attempt=1):
         self.busy = True
-        self.progress = QProgressDialog("Загрузка обновления…", "Отмена", 0, 100)
-        self.progress.setWindowTitle(APP_NAME)
-        self.progress.setMinimumDuration(0)
+        if attempt == 1:
+            self.progress = QProgressDialog("Загрузка обновления…", "Отмена", 0, 100)
+            self.progress.setWindowTitle(APP_NAME)
+            self.progress.setMinimumDuration(0)
+        else:
+            self.progress.setLabelText(f"Загрузка обновления… (попытка {attempt})")
+            self.progress.setValue(0)
         r = self.nam.get(self._request(asset["browser_download_url"], b"application/octet-stream"))
         r.downloadProgress.connect(lambda got, total: total > 0 and self.progress.setValue(int(got * 100 / total)))
-        self.progress.canceled.connect(r.abort)
-        r.finished.connect(lambda: self._on_file(r, asset["name"]))
+        cancel = self.progress.canceled.connect(r.abort)
+        r.finished.connect(lambda: self._on_file(r, asset, attempt, cancel))
 
-    def _on_file(self, r, name):
+    def _on_file(self, r, asset, attempt, cancel):
+        self.progress.canceled.disconnect(cancel)
+        r.deleteLater()
+        err = r.error()
+        payload = bytes(r.readAll()) if err == QNetworkReply.NoError else b""
+        size = asset.get("size")
+        if err == QNetworkReply.OperationCanceledError:
+            self.busy = False
+            self.progress.close()
+            return
+        if err != QNetworkReply.NoError or (size and len(payload) != size):
+            problem = r.errorString() if err != QNetworkReply.NoError else "файл скачался не полностью"
+            if attempt < 3:
+                QTimer.singleShot(1500, lambda: self.download(asset, attempt + 1))
+                return
+            self.busy = False
+            self.progress.close()
+            self._say(False, f"Не удалось скачать обновление:\n{problem}\n\n"
+                             f"Можно скачать вручную: {self.available[1].get('html_url', '')}", True)
+            return
         self.busy = False
         self.progress.close()
-        r.deleteLater()
-        if r.error() != QNetworkReply.NoError:
-            if r.error() != QNetworkReply.OperationCanceledError:
-                self._say(False, f"Не удалось скачать обновление:\n{r.errorString()}", True)
-            return
-        payload = bytes(r.readAll())
+        name = asset["name"]
         try:
             self.apply(payload, name)
         except Exception as e:  # noqa: BLE001

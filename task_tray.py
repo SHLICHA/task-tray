@@ -859,6 +859,15 @@ def windows_update_script(new_exe, cur_exe):
     )
 
 
+def restart_env():
+    """Окружение для запуска новой версии как самостоятельной программы.
+    Без PYINSTALLER_RESET_ENVIRONMENT собранный exe считает себя дочерним процессом старой версии
+    и ищет python*.dll в её уже удалённой временной папке (_MEI…)."""
+    env = dict(os.environ)
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return env
+
+
 class Updater(QObject):
     CHECK_EVERY_MS = 6 * 3600 * 1000
 
@@ -972,11 +981,12 @@ class Updater(QObject):
             if os.name == "nt":
                 bat = tmp / f"tasks-update-{os.getpid()}.bat"
                 bat.write_text(windows_update_script(new, cur), encoding="utf-8")
-                subprocess.Popen(["cmd", "/c", str(bat)], creationflags=0x08000000)  # CREATE_NO_WINDOW
+                subprocess.Popen(["cmd", "/c", str(bat)], env=restart_env(),
+                                 creationflags=0x08000000)  # CREATE_NO_WINDOW
             else:
                 os.replace(new, cur)
                 cur.chmod(0o755)
-                subprocess.Popen([str(cur), "--after-update"])
+                subprocess.Popen([str(cur), "--after-update"], env=restart_env())
         else:
             compile(payload, name, "exec")                     # проверка, что файл целый
             script = Path(__file__).resolve()
@@ -984,7 +994,7 @@ class Updater(QObject):
             new = script.with_name(script.name + ".new")
             new.write_bytes(payload)
             os.replace(new, script)
-            subprocess.Popen([sys.executable, str(script), "--after-update"])
+            subprocess.Popen([sys.executable, str(script), "--after-update"], env=restart_env())
         QApplication.quit()
 
 

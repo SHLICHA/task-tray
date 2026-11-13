@@ -1000,31 +1000,19 @@ def parse_version(s):
     return tuple(parts) or (0,)
 
 
+SETUP_ASSET = "taskssetup.exe"
+
+
 def pick_asset(assets):
-    """Какой файл релиза нужен: .exe для собранной Windows-версии, task_tray.py для запуска из исходника."""
+    """Какой файл релиза нужен: установщик для Windows-версии, task_tray.py для запуска из исходника."""
     frozen = getattr(sys, "frozen", False)
     for a in assets:
         name = a.get("name", "").lower()
-        if frozen and os.name == "nt" and name.endswith(".exe"):
+        if frozen and os.name == "nt" and name == SETUP_ASSET:
             return a
         if not frozen and name == "task_tray.py":
             return a
     return None
-
-
-def windows_update_script(new_exe, cur_exe):
-    """bat-файл: ждёт закрытия программы, подменяет exe и запускает новую версию."""
-    return (
-        "@echo off\r\nchcp 65001 >nul\r\n"
-        "set n=0\r\n"
-        ":wait\r\n"
-        "timeout /t 1 /nobreak >nul\r\n"
-        f'move /y "{new_exe}" "{cur_exe}" >nul 2>&1 && goto run\r\n'
-        "set /a n+=1\r\nif %n% lss 60 goto wait\r\nexit /b 1\r\n"
-        ":run\r\n"
-        f'start "" "{cur_exe}" --after-update\r\n'
-        '(goto) 2>nul & del "%~f0"\r\n'
-    )
 
 
 def restart_env():
@@ -1164,16 +1152,17 @@ class Updater(QObject):
         tmp = Path(tempfile.gettempdir())
         if getattr(sys, "frozen", False):
             cur = Path(sys.executable)
-            if os.name == "nt" and not payload.startswith(b"MZ"):
-                raise ValueError("скачанный файл не похож на программу Windows")
-            new = tmp / f"Tasks-update-{os.getpid()}{cur.suffix}"
-            new.write_bytes(payload)
             if os.name == "nt":
-                bat = tmp / f"tasks-update-{os.getpid()}.bat"
-                bat.write_text(windows_update_script(new, cur), encoding="utf-8")
-                subprocess.Popen(["cmd", "/c", str(bat)], env=restart_env(),
-                                 creationflags=0x08000000)  # CREATE_NO_WINDOW
+                # Установщик сам дождётся закрытия программы, заменит файлы и запустит новую версию
+                if not payload.startswith(b"MZ"):
+                    raise ValueError("скачанный файл не похож на программу Windows")
+                setup = tmp / f"TasksSetup-{os.getpid()}.exe"
+                setup.write_bytes(payload)
+                subprocess.Popen([str(setup), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART",
+                                  "/CLOSEAPPLICATIONS", "/NOCANCEL"], env=restart_env())
             else:
+                new = tmp / f"Tasks-update-{os.getpid()}{cur.suffix}"
+                new.write_bytes(payload)
                 os.replace(new, cur)
                 cur.chmod(0o755)
                 subprocess.Popen([str(cur), "--after-update"], env=restart_env())
